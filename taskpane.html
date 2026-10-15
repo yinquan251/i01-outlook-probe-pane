@@ -1,0 +1,36 @@
+<!doctype html>
+<!-- I01 Outlook feasibility probe task pane. Read-only. Use only with synthetic test messages. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; connect-src 'self' http://127.0.0.1:* https://localhost:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'">
+  <title>I01 Outlook Probe</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <script src="probe-core.js"></script>
+  <script src="taskpane.js"></script>
+  <style>
+    body { font: 13px Segoe UI, sans-serif; margin: 10px; }
+    pre { white-space: pre-wrap; word-break: break-all; background: #f4f4f4; padding: 6px; max-height: 55vh; overflow: auto; }
+    button { margin: 4px 4px 4px 0; }
+    .warn { color: #8a4b00; }
+  </style>
+</head>
+<body>
+  <h3>I01 Outlook Probe</h3>
+  <p class="warn">Feasibility probe. Use a synthetic test message only. This pane never sends, saves, or changes mail, and its report contains no message text.</p>
+  <div>Account (shown here only): <span id="account">…</span></div>
+  <label>Probe token (from the probe server console): <input id="token" size="28" autocomplete="off"></label><br>
+  <button id="run">Run probe</button>
+  <button id="loopback">Test loopback</button>
+  <button id="copy">Copy report</button>
+  <button id="download">Download report</button>
+  <button id="send">Send report to probe server</button>
+  <fieldset><legend>Snapshot export test (synthetic messages only)</legend>
+    <label><input type="checkbox" id="synthetic"> This is a synthetic test message I created for this probe</label><br>
+    <button id="snapDownload" disabled>Download test snapshot</button>
+    <button id="snapCopy" disabled>Copy test snapshot</button>
+  </fieldset>
+  <pre id="out">waiting for Office.onReady…</pre>
+</body>
+</html>
