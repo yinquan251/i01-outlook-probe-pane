@@ -55,29 +55,23 @@
   // Builds a full Markdown snapshot of the current (synthetic) message. Content never enters the report;
   // only the outcome and byte size do.
   async function testSnapshot(mode) {
-    const item = Office.context.mailbox.item;
-    const isRead = I01Probe.detectMode(item) === "read";
-    const subject = isRead ? item.subject : (await I01Probe.callAsync(item.subject.getAsync.bind(item.subject), [], 10000)).value;
-    const body = await I01Probe.callAsync(item.body.getAsync.bind(item.body), [Office.CoercionType.Text], 10000);
     const acct = state.parts.account || {};
-    const md = I01Probe.buildTestSnapshot({ subject: subject, bodyText: body.value || "", accountLabel: acct.maskedLabel,
-      source: acct.accountType === "outlookCom" ? "outlook_personal" : (acct.accountType === "unknown" ? "unknown" : "outlook365"),
-      coverage: "unknown" });
-    const result = { mode: mode, bytes: I01Probe.utf8Bytes(md), bodyStatus: body.status, outcome: "pending" };
-    try {
-      if (mode === "download") {
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(new Blob([md], { type: "text/markdown;charset=utf-8" }));
-        a.download = "i01-test-snapshot.md";
-        document.body.appendChild(a); a.click();
-        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-        result.outcome = "download_triggered_verify_file";
-      } else {
-        await navigator.clipboard.writeText(md);
-        result.outcome = "clipboard_ok";
-      }
-    } catch (e) { result.outcome = "failed: " + e.name; }
-    state.parts.snapshotExport = result;
+    const prepared = await I01Probe.prepareSnapshot(Office, state.tracker, {
+      syntheticConfirmed: $("synthetic").checked, timeoutMs: 10000, parser: new DOMParser(), accountLabel: acct.maskedLabel,
+      source: acct.accountType === "outlookCom" ? "outlook_personal" : (acct.accountType === "office365" || acct.accountType === "enterprise" ? "outlook365" : "unknown"),
+    });
+    const result = { mode: mode, ok: prepared.ok };
+    if (!prepared.ok) {
+      result.outcome = "not_exported";
+      result.error = prepared.error;
+      result.detail = prepared.detail;
+    } else {
+      result.bytes = prepared.bytes;
+      result.bodySource = prepared.bodySource;
+      Object.assign(result, await I01Probe.deliverSnapshot(prepared.markdown, mode,
+        { document: document, URL: URL, Blob: Blob, clipboard: navigator.clipboard, setTimeout: setTimeout }));
+    }
+    state.parts.snapshotExport = result;  // outcome and size only; never the snapshot text
     show();
   }
 

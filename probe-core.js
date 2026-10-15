@@ -252,6 +252,125 @@
 
   function utf8Bytes(text) { return new TextEncoder().encode(text).length; }
 
+  const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: "\"", "#39": "'", apos: "'", nbsp: " " };
+
+  function normalizeText(t) {
+    return String(t).replace(/\r\n?/g, "\n").replace(/[ \t\u00a0]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  // Safe HTML -> text. With a DOMParser the document is inert: scripts never run and images or
+  // stylesheets are never fetched. Without one, a conservative tag stripper is used.
+  function htmlToText(html, parser) {
+    const src = String(html || "");
+    if (parser && typeof parser.parseFromString === "function") {
+      const doc = parser.parseFromString(src, "text/html");
+      doc.querySelectorAll("script,style,noscript,template,head").forEach(function (n) { n.remove(); });
+      doc.querySelectorAll("br").forEach(function (n) { n.replaceWith("\n"); });
+      doc.querySelectorAll("p,div,li,tr,h1,h2,h3,h4,h5,h6,blockquote").forEach(function (n) { n.append("\n"); });
+      return normalizeText(doc.body ? doc.body.textContent : "");
+    }
+    const stripped = src
+      .replace(/<(script|style|noscript|template|head)\b[\s\S]*?<\/\1>/gi, "")
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/(p|div|li|tr|h[1-6]|blockquote)>/gi, "\n")
+      .replace(/<[^>]*>/g, "")
+      .replace(/&(#39|[a-z]+);/gi, function (m, k) { return Object.prototype.hasOwnProperty.call(ENTITIES, k.toLowerCase()) ? ENTITIES[k.toLowerCase()] : m; })
+      .replace(/&#(\d+);/g, function (m, d) { return String.fromCodePoint(Number(d)); });
+    return normalizeText(stripped);
+  }
+
+  // Identity of the currently selected item, used to detect a message switch during async reads.
+  function itemIdentity(item) {
+    if (!item) return null;
+    return JSON.stringify([item.itemId || null, item.internetMessageId || null, item.conversationId || null,
+      typeof item.subject === "string" ? item.subject.length : "compose"]);
+  }
+
+  // Reads the selected (synthetic) message and builds the test snapshot. Never exports on failure.
+  // Returns {ok:true, markdown, bytes, bodySource} or {ok:false, error, detail}.
+  async function prepareSnapshot(Office, tracker, opts) {
+    const o = opts || {};
+    const timeoutMs = o.timeoutMs || 10000;
+    if (!o.syntheticConfirmed) return { ok: false, error: "synthetic_not_confirmed", detail: "tick the synthetic-message box first" };
+    const mailbox = Office && Office.context && Office.context.mailbox;
+    const item = mailbox && mailbox.item;
+    if (!item || !item.body || typeof item.body.getAsync !== "function") return { ok: false, error: "no_item", detail: "" };
+    const ticket = tracker.begin();
+    const identityBefore = itemIdentity(item);
+    let subject;
+    if (detectMode(item) === "read") {
+      subject = item.subject;
+    } else if (detectMode(item) === "compose") {
+      const r = await callAsync(item.subject.getAsync.bind(item.subject), [], timeoutMs);
+      if (r.status !== "succeeded") return { ok: false, error: r.status === "timeout" ? "subject_read_timeout" : "subject_read_failed", detail: r.error || "" };
+      subject = r.value;
+    } else {
+      return { ok: false, error: "unknown_mode", detail: "" };
+    }
+    const coercion = Office.CoercionType || { Text: "text", Html: "html" };
+    let bodyText = null;
+    let bodySource = null;
+    const text = await callAsync(item.body.getAsync.bind(item.body), [coercion.Text], timeoutMs);
+    if (text.status === "succeeded" && String(text.value || "").trim()) {
+      bodyText = normalizeText(text.value);
+      bodySource = "text";
+    } else {
+      const html = await callAsync(item.body.getAsync.bind(item.body), [coercion.Html], timeoutMs);
+      if (html.status === "succeeded") {
+        bodyText = htmlToText(html.value, o.parser);
+        bodySource = "html";
+      } else {
+        const timedOut = text.status === "timeout" || html.status === "timeout";
+        return { ok: false, error: timedOut ? "body_read_timeout" : "body_read_failed",
+          detail: "text=" + text.status + " html=" + html.status };
+      }
+    }
+    if (ticket.isStale() || mailbox.item !== item || itemIdentity(mailbox.item) !== identityBefore) {
+      return { ok: false, error: "stale_item", detail: "the selected message changed during the read; nothing was exported" };
+    }
+    const markdown = buildTestSnapshot({
+      subject: subject, bodyText: bodyText, accountLabel: o.accountLabel, source: o.source || "unknown",
+      coverage: "unknown", capturedAt: o.now ? o.now() : new Date(),
+      warnings: ["probe_snapshot_not_production"].concat(bodySource === "html" ? ["body_from_html_conversion"] : []),
+    });
+    return { ok: true, markdown: markdown, bytes: utf8Bytes(markdown), bodySource: bodySource };
+  }
+
+  // Hands the snapshot to the user: a file download or the clipboard (with a select-text fallback).
+  // env: {document, URL, Blob, clipboard, setTimeout}
+  async function deliverSnapshot(markdown, mode, env) {
+    if (mode === "download") {
+      try {
+        const href = env.URL.createObjectURL(new env.Blob([markdown], { type: "text/markdown;charset=utf-8" }));
+        const a = env.document.createElement("a");
+        a.href = href;
+        a.download = "i01-test-snapshot.md";
+        env.document.body.appendChild(a);
+        a.click();
+        (env.setTimeout || setTimeout)(function () { env.URL.revokeObjectURL(href); a.remove(); }, 1000);
+        return { outcome: "download_triggered_verify_file" };
+      } catch (e) {
+        return { outcome: "download_failed", error: e && e.name ? e.name : String(e) };
+      }
+    }
+    if (mode === "clipboard") {
+      try {
+        if (!env.clipboard || typeof env.clipboard.writeText !== "function") throw { name: "NotSupportedError" };
+        await env.clipboard.writeText(markdown);
+        return { outcome: "clipboard_ok" };
+      } catch (e) {
+        const ta = env.document.createElement("textarea");
+        ta.value = markdown;
+        ta.readOnly = true;
+        env.document.body.appendChild(ta);
+        if (typeof ta.select === "function") ta.select();
+        return { outcome: "clipboard_fallback_selected", error: e && e.name ? e.name : String(e) };
+      }
+    }
+    return { outcome: "unknown_mode" };
+  }
+
   const FORBIDDEN_CALLS = ["sendAsync", "saveAsync", "setAsync", "displayReplyForm", "displayReplyAllForm",
     "displayNewMessageForm", "moveAsync", "deleteAsync", "removeAttachmentAsync", "addFileAttachmentAsync"];
 
@@ -259,5 +378,6 @@
     PROBE_VERSION, MAILBOX_SETS, FORBIDDEN_CALLS, classifyEnvironment, requirementSets, diagnostics, detectMode,
     present, callAsync, bodyInfo, attachmentInfo, itemSummary, fingerprint, maskAddress, accountInfo,
     createItemTracker, registerItemChanged, loopbackTest, loopbackTargets, buildReport, buildTestSnapshot, utf8Bytes,
+    normalizeText, htmlToText, itemIdentity, prepareSnapshot, deliverSnapshot,
   };
 });
